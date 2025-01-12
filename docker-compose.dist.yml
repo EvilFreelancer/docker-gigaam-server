@@ -1,0 +1,21 @@
+services:
+
+  gigaam:
+    build:
+      context: ./gigaam
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./audio:/app/audio
+      - ./models:/app/models
+    environment:
+      - GIGAAM_MODEL=${GIGAAM_MODEL:-rnnt}
+      - HF_TOKEN=${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]

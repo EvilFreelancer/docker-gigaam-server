@@ -2,6 +2,9 @@
 /venv/
 /*_data/
 /docker-compose.yml
+/audio/
+/models/
+.env
 __pycache__
 *.mp3
 *.m4a
