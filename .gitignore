@@ -1,0 +1,9 @@
+/.idea/
+/venv/
+/*_data/
+/docker-compose.yml
+__pycache__
+*.mp3
+*.m4a
+*.wav
+*.opus
