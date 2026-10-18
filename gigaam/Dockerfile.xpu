@@ -1,0 +1,48 @@
+# GigaAM ASR server, Intel GPUs (Arc A and B series, Arc Pro, Data Center Max) on torch XPU.
+#
+# The base is Intel's compute runtime image (Level Zero and OpenCL drivers on Ubuntu 24.04);
+# torch for XPU brings its own SYCL runtime as wheels. The host needs only the kernel driver
+# (i915 or xe) and the GPU passed in with --device /dev/dri. GigaAM itself is device-agnostic
+# and runs on "xpu" as it is; the encoder runs under fp16 autocast like on CUDA.
+ARG BASE=intel/compute-runtime:26.31.39395.13-runtime-ubuntu24.04-20260907
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DO_NOT_TRACK=1 \
+    ZES_ENABLE_SYSMAN=1
+
+# The base lists Intel's GPU apt repository for its own packages, which are installed
+# already; drop it so apt only talks to Ubuntu (the Intel repository has answered 403).
+RUN set -xe \
+ && grep -rl repositories.intel.com /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | xargs -r rm -f \
+ && apt-get update -q \
+ && apt-get install -yq --no-install-recommends python3 python3-venv ffmpeg git curl ca-certificates \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+ARG TORCH_VERSION=2.10.0
+ARG TORCH_INDEX=https://download.pytorch.org/whl/xpu
+RUN pip install --index-url ${TORCH_INDEX} \
+      "torch==${TORCH_VERSION}" "torchaudio==${TORCH_VERSION}"
+
+ARG GIGAAM_REF=559d88d6b72541412743929f633a6ae7c9950b85
+RUN pip install "gigaam @ git+https://github.com/salute-developers/GigaAM.git@${GIGAAM_REF}"
+
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt \
+ && python -c "import torch; assert torch.__version__.endswith('+xpu'), torch.__version__"
+
+COPY asr.py main.py /app/
+
+ENV GIGAAM_DEVICE=xpu \
+    GIGAAM_CACHE_DIR=/models \
+    APP_PORT=8770
+EXPOSE 8770
+
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}"]

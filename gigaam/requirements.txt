@@ -1,10 +1,7 @@
-python-dotenv~=1.0.1
-flask~=3.0.3
-flask-cors~=4.0.1
-requests~=2.32.3
-pyyaml~=6.0.2
-gunicorn~=23.0.0
-gigaam @ git+https://github.com/salute-developers/GigaAM.git#egg=gigaam[lognform]
-pyannote.audio~=3.3.2
-pybind11>=2.1
-numpy~=1.0
+# API server (torch, torchaudio and gigaam are installed in the Dockerfiles)
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34
+python-multipart>=0.0.20
+
+# Voice activity detection for long-form audio; weights ship inside the wheel
+silero-vad>=6.2,<7

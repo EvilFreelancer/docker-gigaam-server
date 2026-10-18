@@ -1,0 +1,58 @@
+# docker-gigaam-server: Russian speech-to-text on GigaAM v3 (Sber, MIT) behind an
+# OpenAI-compatible API, Intel GPU (Arc A and B series, Arc Pro) on torch XPU.
+#
+#   8770 POST /v1/audio/transcriptions   multipart; json, text, srt, vtt, verbose_json; stream
+#        GET  /v1/models, /health, /docs
+#
+# Run:    cp docker-compose.intel.dist.yml docker-compose.yml && cp .env.dist .env
+#         docker compose pull   # the published image, or: docker compose build
+#         docker compose up -d
+# Check:  curl -s localhost:8770/health   (says "device":"xpu")
+#         curl -s -F file=@sample.wav -F model=gigaam localhost:8770/v1/audio/transcriptions
+#
+# The host needs only the kernel driver (i915 or xe) and its render nodes; the user-space
+# driver and torch are in the image. GPU_INDEX picks the card in Level Zero order, which
+# is the PCI order of /dev/dri/by-path.
+#
+# This folder:
+#   docker-compose.yml   this file, copied from docker-compose.intel.dist.yml
+#   .env                 the knobs, copied from .env.dist
+#   gigaam/              the server (main.py, asr.py) and its Dockerfiles
+#   models/              GigaAM checkpoints and tokenizers; empty on the first start, the
+#                        server downloads them from the Sber CDN (~450 MB per model)
+#   cache/               the Level Zero compiler cache, so a restart compiles fewer kernels
+
+x-shared-logs: &shared-logs
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  gigaam:
+    image: evilfreelancer/gigaam-server:${GIGAAM_IMAGE_TAG:-latest}-xpu
+    build:
+      context: ./gigaam
+      dockerfile: Dockerfile.xpu
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GIGAAM_DEVICE: "xpu"
+      GIGAAM_CACHE_DIR: "/models"
+      ONEAPI_DEVICE_SELECTOR: "level_zero:${GPU_INDEX:-0}"
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./models:/models
+      - ./cache:/root/.cache
+    ports:
+      - "${GIGAAM_PORT:-8770}:8770"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8770/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    <<: *shared-logs

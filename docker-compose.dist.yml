@@ -1,21 +1,54 @@
+# docker-gigaam-server: Russian speech-to-text on GigaAM v3 (Sber, MIT) behind an
+# OpenAI-compatible API, NVIDIA GPU. Intel GPUs: docker-compose.intel.dist.yml.
+#
+#   8770 POST /v1/audio/transcriptions   multipart; json, text, srt, vtt, verbose_json; stream
+#        GET  /v1/models, /health, /docs
+#
+# Run:    cp docker-compose.dist.yml docker-compose.yml && cp .env.dist .env
+#         docker compose pull   # the published image, or: docker compose build
+#         docker compose up -d
+# Check:  curl -s localhost:8770/health
+#         curl -s -F file=@sample.wav -F model=gigaam localhost:8770/v1/audio/transcriptions
+#
+# This folder:
+#   docker-compose.yml   this file, copied from docker-compose.dist.yml
+#   .env                 the knobs, copied from .env.dist
+#   gigaam/              the server (main.py, asr.py) and its Dockerfiles
+#   models/              GigaAM checkpoints and tokenizers; empty on the first start, the
+#                        server downloads them from the Sber CDN (~450 MB per model)
+
+x-shared-logs: &shared-logs
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
 
   gigaam:
+    image: evilfreelancer/gigaam-server:${GIGAAM_IMAGE_TAG:-latest}-cuda
     build:
       context: ./gigaam
+      dockerfile: Dockerfile
     restart: unless-stopped
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./audio:/app/audio
-      - ./models:/app/models
+    env_file: .env
     environment:
-      - GIGAAM_MODEL=${GIGAAM_MODEL:-rnnt}
-      - HF_TOKEN=${HF_TOKEN:-}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+      GIGAAM_DEVICE: "cuda"
+      GIGAAM_CACHE_DIR: "/models"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+    volumes:
+      - ./models:/models
+    ports:
+      - "${GIGAAM_PORT:-8770}:8770"
+    gpus:
+      - driver: nvidia
+        device_ids: ["${GPU_INDEX:-0}"]
+        capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8770/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    <<: *shared-logs
