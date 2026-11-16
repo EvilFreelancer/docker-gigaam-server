@@ -76,7 +76,9 @@ curl -sSL https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/example.wav \
 
 `long_example.wav` на том же CDN длится 71 секунду и проверяет нарезку по паузам.
 
-Субтитры и временные метки слов.
+Субтитры и временные метки слов. Для `verbose_json` оба массива (`segments` и `words`)
+возвращаются по умолчанию, если `timestamp_granularities[]` не передан. Явно указывайте
+`segment` или `word`, чтобы ограничить поля ответа; обе гранулярности можно запросить вместе.
 
 ```bash
 curl -s http://localhost:8770/v1/audio/transcriptions \

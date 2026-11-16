@@ -58,6 +58,7 @@ MAX_FILE_MB = float(os.getenv("GIGAAM_MAX_FILE_MB", "1024"))
 OWNED_BY = os.getenv("GIGAAM_OWNED_BY", "salute-developers")
 
 RESPONSE_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
+DEFAULT_VERBOSE_GRANULARITIES = {"segment", "word"}
 
 engine: Optional[AsrEngine] = None
 _started_at = int(time.time())
@@ -243,7 +244,7 @@ def _compression_ratio(text: str) -> float:
 
 
 def _verbose_json(result: Transcription, granularities: Iterable[str]) -> dict:
-    wanted = set(granularities) or {"segment"}
+    wanted = set(granularities) or DEFAULT_VERBOSE_GRANULARITIES
     payload = {
         "task": "transcribe",
         "language": LANGUAGE,
@@ -374,6 +375,8 @@ async def transcriptions(
         raise ApiError(404, f"The model '{model}' does not exist", param="model")
 
     wanted = set(granularities or []) | set(granularities_plain or [])
+    if response_format == "verbose_json" and not wanted:
+        wanted = DEFAULT_VERBOSE_GRANULARITIES
     unknown = wanted - {"word", "segment"}
     if unknown:
         raise ApiError(
