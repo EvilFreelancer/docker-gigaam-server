@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import threading
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -27,7 +29,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadF
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from asr import AsrEngine, Transcription
+from asr import AsrEngine, AudioDecodeError, Transcription
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -57,8 +59,8 @@ LANGUAGE = os.getenv("GIGAAM_LANGUAGE", "ru").strip()
 MAX_FILE_MB = float(os.getenv("GIGAAM_MAX_FILE_MB", "1024"))
 OWNED_BY = os.getenv("GIGAAM_OWNED_BY", "salute-developers")
 
-RESPONSE_FORMATS = {"json", "text", "srt", "vtt", "verbose_json"}
-DEFAULT_VERBOSE_GRANULARITIES = {"segment", "word"}
+RESPONSE_FORMATS = {"json", "text", "srt", "vtt", "verbose_json", "diarized_json"}
+DEFAULT_VERBOSE_GRANULARITIES = {"segment"}
 
 engine: Optional[AsrEngine] = None
 _started_at = int(time.time())
@@ -134,6 +136,12 @@ async def _validation_error_handler(_: Request, exc: RequestValidationError) -> 
     return _error(400, first.get("msg", "invalid request"), param=param)
 
 
+@app.exception_handler(Exception)
+async def _unexpected_error_handler(_: Request, exc: Exception) -> JSONResponse:
+    LOG.exception("unhandled API error", exc_info=exc)
+    return _error(500, "Internal server error.", err_type="server_error")
+
+
 # ---------------------------------------------------------------------------
 # lifecycle
 # ---------------------------------------------------------------------------
@@ -204,13 +212,10 @@ def health() -> dict:
 
 
 def _timestamp(seconds: float, millis_sep: str = ",") -> str:
-    hours, rest = divmod(max(seconds, 0.0), 3600)
-    minutes, secs = divmod(rest, 60)
-    whole = int(secs)
-    millis = int(round((secs - whole) * 1000))
-    if millis == 1000:  # rounding carry
-        whole += 1
-        millis = 0
+    total_millis = round(max(seconds, 0.0) * 1000)
+    hours, remainder = divmod(total_millis, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole, millis = divmod(remainder, 1000)
     return f"{int(hours):02d}:{int(minutes):02d}:{whole:02d}{millis_sep}{millis:03d}"
 
 
@@ -287,24 +292,107 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _stream_response(result: Transcription) -> StreamingResponse:
-    """SSE in the shape openai-python expects for streamed transcriptions."""
+def _stream_response(
+    api: AsrEngine, audio_path: str, model_name: str, word_timestamps: bool
+) -> StreamingResponse:
+    """Send transcript deltas as each GigaAM batch finishes decoding."""
 
-    def events():
-        for index, segment in enumerate(result.segments):
-            delta = segment.text if index == 0 else " " + segment.text
-            yield _sse({"type": "transcript.text.delta", "delta": delta, "logprobs": []})
-        yield _sse(
-            {
-                "type": "transcript.text.done",
-                "text": result.text,
-                "logprobs": [],
-                "usage": _usage(result),
-            }
-        )
-        yield "data: [DONE]\n\n"
+    cancel_event = threading.Event()
+    upload_lock = threading.Lock()
+    upload_owned = False
 
-    return StreamingResponse(
+    def claim_upload() -> bool:
+        nonlocal upload_owned
+        with upload_lock:
+            if upload_owned:
+                return False
+            upload_owned = True
+            return True
+
+    def remove_upload() -> None:
+        try:
+            os.unlink(audio_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOG.exception("failed to remove temporary audio upload %s", audio_path)
+            nonlocal upload_owned
+            with upload_lock:
+                upload_owned = False
+
+    async def events():
+        results = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def on_segment(segment):
+            if not cancel_event.is_set():
+                loop.call_soon_threadsafe(results.put_nowait, ("segment", segment))
+
+        def transcribe():
+            if not claim_upload():
+                return
+            try:
+                result = api.transcribe(
+                    audio_path,
+                    model_name,
+                    word_timestamps,
+                    on_segment=on_segment,
+                    cancel_event=cancel_event,
+                )
+            except Exception as exc:
+                LOG.exception("streamed transcription failed")
+                is_decode_error = isinstance(exc, AudioDecodeError)
+                error = {
+                    "message": (
+                        "Audio file could not be decoded. Supported formats: "
+                        "flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm."
+                        if is_decode_error
+                        else "Internal server error."
+                    ),
+                    "type": "invalid_request_error" if is_decode_error else "server_error",
+                    "param": "file" if is_decode_error else None,
+                    "code": None,
+                }
+                loop.call_soon_threadsafe(results.put_nowait, ("error", error))
+            else:
+                loop.call_soon_threadsafe(results.put_nowait, ("done", result))
+            finally:
+                remove_upload()
+
+        worker = asyncio.create_task(asyncio.to_thread(transcribe))
+        emitted = False
+        try:
+            while True:
+                kind, value = await results.get()
+                if kind == "segment":
+                    delta = value.text if not emitted else " " + value.text
+                    emitted = True
+                    yield _sse({"type": "transcript.text.delta", "delta": delta})
+                elif kind == "error":
+                    yield _sse({"error": value})
+                    yield "data: [DONE]\n\n"
+                    return
+                else:
+                    yield _sse({"type": "transcript.text.done", "text": value.text})
+                    yield "data: [DONE]\n\n"
+                    return
+        finally:
+            cancel_event.set()
+            if not worker.done():
+                worker.cancel()
+            if claim_upload():
+                remove_upload()
+
+    class UploadCleanupStreamingResponse(StreamingResponse):
+        async def __call__(self, scope, receive, send):
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                cancel_event.set()
+                if claim_upload():
+                    remove_upload()
+
+    return UploadCleanupStreamingResponse(
         events(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -356,6 +444,17 @@ async def transcriptions(
     stream: bool = Form(False),
     granularities: Optional[List[str]] = Form(None, alias="timestamp_granularities[]"),
     granularities_plain: Optional[List[str]] = Form(None, alias="timestamp_granularities"),
+    include: Optional[List[str]] = Form(None, alias="include[]"),
+    include_plain: Optional[List[str]] = Form(None, alias="include"),
+    languages: Optional[List[str]] = Form(None, alias="languages[]"),
+    languages_plain: Optional[List[str]] = Form(None, alias="languages"),
+    keywords: Optional[List[str]] = Form(None, alias="keywords[]"),
+    keywords_plain: Optional[List[str]] = Form(None, alias="keywords"),
+    chunking_strategy: Optional[str] = Form(None),
+    known_speaker_names: Optional[List[str]] = Form(None, alias="known_speaker_names[]"),
+    known_speaker_names_plain: Optional[List[str]] = Form(None, alias="known_speaker_names"),
+    known_speaker_references: Optional[List[str]] = Form(None, alias="known_speaker_references[]"),
+    known_speaker_references_plain: Optional[List[str]] = Form(None, alias="known_speaker_references"),
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
@@ -365,9 +464,76 @@ async def transcriptions(
         raise ApiError(
             400,
             f"Invalid value: '{response_format}'. Supported values are: "
-            + ", ".join(sorted(RESPONSE_FORMATS))
+            + ", ".join(sorted(RESPONSE_FORMATS - {"diarized_json"}))
             + ".",
             param="response_format",
+        )
+    if response_format == "diarized_json":
+        raise ApiError(
+            400,
+            "Speaker diarization is not supported by the configured GigaAM models.",
+            param="response_format",
+        )
+    if stream and response_format != "json":
+        raise ApiError(
+            400,
+            "Streaming supports only response_format=json.",
+            param="response_format",
+        )
+
+    if temperature is not None and (
+        not math.isfinite(temperature) or not 0 <= temperature <= 1
+    ):
+        raise ApiError(400, "Temperature must be between 0 and 1.", param="temperature")
+
+    requested_include = set(include or []) | set(include_plain or [])
+    if requested_include:
+        unsupported = requested_include - {"logprobs"}
+        if unsupported:
+            raise ApiError(
+                400,
+                f"Invalid value: '{sorted(unsupported)[0]}'. Supported values are: logprobs.",
+                param="include[]",
+            )
+        raise ApiError(
+            400,
+            "Log probabilities are not available for the configured GigaAM models.",
+            param="include[]",
+        )
+
+    if languages or languages_plain:
+        raise ApiError(
+            400,
+            "The configured GigaAM models do not support language-list hints.",
+            param="languages[]",
+        )
+    if keywords or keywords_plain:
+        raise ApiError(
+            400,
+            "The configured GigaAM models do not support keyword hints.",
+            param="keywords[]",
+        )
+    if (
+        known_speaker_names
+        or known_speaker_names_plain
+        or known_speaker_references
+        or known_speaker_references_plain
+    ):
+        param = (
+            "known_speaker_names[]"
+            if known_speaker_names or known_speaker_names_plain
+            else "known_speaker_references[]"
+        )
+        raise ApiError(
+            400,
+            "Speaker diarization and known-speaker references are not supported.",
+            param=param,
+        )
+    if chunking_strategy not in (None, "auto"):
+        raise ApiError(
+            400,
+            "Only the automatic chunking strategy is supported.",
+            param="chunking_strategy",
         )
 
     resolved = api.resolve(model)
@@ -384,15 +550,25 @@ async def transcriptions(
             f"Invalid value: '{sorted(unknown)[0]}'. Supported values are: word, segment.",
             param="timestamp_granularities[]",
         )
+    if wanted and response_format != "verbose_json":
+        raise ApiError(
+            400,
+            "timestamp_granularities can only be used with response_format=verbose_json.",
+            param="timestamp_granularities[]",
+        )
     want_words = "word" in wanted and response_format == "verbose_json"
 
     audio_path = await _save_upload(file)
     started = time.monotonic()
+    if stream:
+        LOG.info("%s: starting streamed transcription (%s)", resolved, response_format)
+        return _stream_response(api, audio_path, resolved, want_words)
+
     try:
         result = await asyncio.to_thread(
             api.transcribe, audio_path, resolved, want_words
         )
-    except RuntimeError as exc:  # ffmpeg failure on a non-audio upload
+    except AudioDecodeError as exc:
         LOG.warning("decode failed for %s: %s", file.filename, exc)
         raise ApiError(
             400,
@@ -412,10 +588,8 @@ async def transcriptions(
         response_format,
     )
 
-    if stream:
-        return _stream_response(result)
     if response_format == "text":
-        return PlainTextResponse(result.text + "\n")
+        return PlainTextResponse(result.text)
     if response_format == "srt":
         return PlainTextResponse(_srt(result), media_type="application/x-subrip")
     if response_format == "vtt":

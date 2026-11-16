@@ -76,9 +76,9 @@ curl -sSL https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/example.wav \
 
 `long_example.wav` на том же CDN длится 71 секунду и проверяет нарезку по паузам.
 
-Субтитры и временные метки слов. Для `verbose_json` оба массива (`segments` и `words`)
-возвращаются по умолчанию, если `timestamp_granularities[]` не передан. Явно указывайте
-`segment` или `word`, чтобы ограничить поля ответа; обе гранулярности можно запросить вместе.
+Временные метки в `verbose_json` следуют поведению OpenAI: если `timestamp_granularities[]`
+не передан, возвращаются сегменты. Укажите `word`, чтобы запросить слова, `segment` для
+сегментов или передайте оба значения, чтобы получить оба массива.
 
 ```bash
 curl -s http://localhost:8770/v1/audio/transcriptions \
@@ -101,13 +101,29 @@ client = OpenAI(base_url="http://localhost:8770/v1", api_key="not-needed")
 with open("audio.mp3", "rb") as f:
     print(client.audio.transcriptions.create(file=f, model="gigaam-v3-e2e-rnnt").text)
 
-# потоковый режим: события transcript.text.delta по сегментам, затем transcript.text.done
+# потоковый режим: delta по мере декодирования batch-ей, затем transcript.text.done
 with open("audio.mp3", "rb") as f:
     for event in client.audio.transcriptions.create(
         file=f, model="gigaam-v3-e2e-rnnt", stream=True
     ):
         print(event.type, getattr(event, "delta", ""))
 ```
+
+`stream=true` при `response_format=json` передаёт текст SSE-событиями по мере декодирования сегментов в batch-ах.
+Другие response formats вместе с streaming отклоняются, поскольку SSE-события содержат только текст.
+Событие `transcript.text.done` не содержит `usage`: GigaAM считает длительность, а OpenAI stream
+schema описывает там token usage. В обычном JSON-ответе usage возвращается в секундах.
+Файл сначала
+загружается целиком; VAD и подготовка границ для длинной записи также выполняются до начала
+распознавания. Это потоковый ответ на готовый файл, не live-распознавание входящего аудио.
+Для live-микрофона нужен отдельный streaming/realtime inference pipeline.
+
+У GigaAM нет выдачи token log probabilities и speaker diarization. Поэтому `include[]=logprobs`,
+`response_format=diarized_json` и параметры известных голосов возвращают ошибку OpenAI-формата,
+а не фиктивные данные. `languages[]` и `keywords[]` как подсказки тоже не поддерживаются.
+`chunking_strategy=auto` принимается, поскольку сервер уже использует VAD; другие значения
+отклоняются. `language`, `prompt` и допустимое `temperature` принимаются для совместимости,
+но не меняют фиксированный decoder GigaAM.
 
 Принимается любой формат, который декодирует ffmpeg (wav, mp3, ogg, m4a, webm, mp4, flac),
 внутри всё приводится к 16 кГц моно.
@@ -127,6 +143,16 @@ GigaAM не распознаёт за один проход больше 25 се
 Если VAD не нашёл речи совсем, файл всё равно обрабатывается окнами фиксированной длины.
 Запросы идут по очереди под одной блокировкой, потому что модель silero хранит внутреннее
 состояние RNN и два потока внутри VAD роняют процесс.
+
+## Тесты
+
+Тесты API используют подменённый ASR-движок, поэтому не требуют GPU или скачивания весов.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-test.txt
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 ## Настройки
 
