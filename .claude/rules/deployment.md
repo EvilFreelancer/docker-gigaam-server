@@ -1,0 +1,15 @@
+---
+paths:
+  - "gigaam/Dockerfile*"
+  - "docker-compose*.yml"
+  - ".env.dist"
+  - ".github/workflows/*.yml"
+---
+
+# Deployment and image builds
+
+- Keep the CUDA/NVIDIA and XPU/Intel paths both functional. Compare `gigaam/Dockerfile`, `gigaam/Dockerfile.xpu`, `docker-compose.dist.yml`, and `docker-compose.intel.dist.yml` when changing shared application requirements or startup configuration.
+- Keep app runtime configuration documented in `.env.dist` and `README.md`. Never put real credentials in either file; keep published image credentials in GitHub Actions secrets.
+- Keep the upstream GigaAM commit pinned in both Dockerfiles unless an intentional upgrade validates the internal API used by `asr.py` on both image paths.
+- Do not claim that the host CI runs unit tests: `.github/workflows/build-and-push.yml` builds and publishes `linux/amd64` CUDA and XPU images on version tags or manual dispatch.
+- Document hardware/runtime requirements and preserve GPU selection behavior (`GPU_INDEX`, CUDA device IDs, and Level Zero selection) when changing Compose files.

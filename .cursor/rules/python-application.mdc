@@ -1,0 +1,14 @@
+---
+description: Python responsibilities and boundaries for the API and ASR engine
+globs: "gigaam/*.py"
+alwaysApply: false
+---
+
+# Python application boundaries
+
+- `gigaam/main.py` is the FastAPI transport adapter. Keep request validation, authentication, OpenAI-compatible errors, response formatting, upload ownership/cleanup, and SSE lifecycle here. Do not implement audio decoding, VAD, model loading, or inference in route handlers.
+- `gigaam/asr.py` owns model/checkpoint setup, model aliases, audio loading, VAD segmentation, chunk planning, batched decoding, timestamp adjustment, and serialized access to GPU/VAD state. Keep HTTP status codes and response serialization out of the engine.
+- Preserve the explicit API-to-engine interface. A cross-boundary change should test both the engine behavior and the resulting API contract where applicable.
+- `asr.py` uses pinned upstream GigaAM internals (`AudioDataset`, `forward`, and `_decode`). Before changing those calls or the pin, inspect both CUDA and XPU Dockerfiles and verify the relevant assumptions.
+- Preserve audio duration and timestamp offsets when splitting/changing chunking. Keep the configured single-shot limit below the upstream 25-second ceiling and preserve cancellation checks around expensive work.
+- Keep GPU and Silero VAD work serialized through the engine lock; the Silero model has mutable recurrent state.

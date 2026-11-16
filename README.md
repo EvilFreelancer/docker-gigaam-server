@@ -154,6 +154,19 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+## Публикация Docker-образов
+
+Workflow `.github/workflows/build-and-push.yml` собирает и публикует варианты CUDA и XPU для `linux/amd64`. Push тега проекта `vX.Y.Z` создаёт образы `evilfreelancer/gigaam-server:X.Y.Z-cuda` и `evilfreelancer/gigaam-server:X.Y.Z-xpu`, а также обновляет теги `latest-cuda` и `latest-xpu`.
+
+Например, релиз `v1.2.3` публикуется так:
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+Workflow можно запустить вручную через `workflow_dispatch`, выбрав ветку или тег. Запуск обновляет `latest-cuda` и `latest-xpu`; если выбран тег `vX.Y.Z`, также публикуются соответствующие versioned tags. Для входа в Docker Hub в настройках GitHub Actions должны быть заданы secrets `DOCKERHUB_USERNAME` и `DOCKERHUB_TOKEN`. Сборка образов не запускает тесты. Версия upstream GigaAM остаётся закреплённой в Dockerfiles и автоматически не отслеживается.
+
 ## Настройки
 
 Всё в `.env` (шаблон `.env.dist`).
