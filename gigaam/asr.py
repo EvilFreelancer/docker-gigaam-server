@@ -16,7 +16,7 @@ import io
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -51,6 +51,10 @@ class Transcription:
     text: str
     duration: float
     segments: List[Segment]
+
+
+class AudioDecodeError(RuntimeError):
+    """Raised only when the uploaded file cannot be decoded as audio."""
 
 
 def model_id(checkpoint_name: str) -> str:
@@ -195,7 +199,11 @@ class AsrEngine:
         wav: torch.Tensor,
         chunks: Sequence[Tuple[float, float]],
         word_timestamps: bool,
+        on_segment: Optional[Callable[[Segment], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> List[Segment]:
+        if cancel_event is not None and cancel_event.is_set():
+            return []
         items = [
             wav[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)].numpy()
             for start, end in chunks
@@ -217,47 +225,74 @@ class AsrEngine:
         segments: List[Segment] = []
         index = 0
         for wav_pad, wav_lens in loader:
+            if cancel_event is not None and cancel_event.is_set():
+                break
             wav_pad = wav_pad.to(model._device).to(model._dtype)
             wav_lens = wav_lens.to(model._device)
             encoded, encoded_len = model.forward(wav_pad, wav_lens)
             for text, words in model._decode(
                 encoded, encoded_len, wav_lens, word_timestamps
             ):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 start, end = chunks[index]
                 index += 1
-                segments.append(
-                    Segment(
-                        start=round(start, 3),
-                        end=round(end, 3),
-                        text=text.strip(),
-                        words=[
-                            Word(
-                                text=word.text,
-                                start=round(word.start + start, 3),
-                                end=round(word.end + start, 3),
-                            )
-                            for word in (words or [])
-                        ],
-                    )
+                segment = Segment(
+                    start=round(start, 3),
+                    end=round(end, 3),
+                    text=text.strip(),
+                    words=[
+                        Word(
+                            text=word.text,
+                            start=round(word.start + start, 3),
+                            end=round(word.end + start, 3),
+                        )
+                        for word in (words or [])
+                    ],
                 )
+                segments.append(segment)
+                if segment.text and on_segment is not None:
+                    on_segment(segment)
         return segments
 
     def transcribe(
-        self, audio_path: str, model_name: Optional[str] = None, word_timestamps: bool = False
+        self,
+        audio_path: str,
+        model_name: Optional[str] = None,
+        word_timestamps: bool = False,
+        on_segment: Optional[Callable[[Segment], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Transcription:
         model_key = self.resolve(model_name)
         if model_key is None:
             raise KeyError(model_name)
         model = self.models[model_key]
 
-        wav = load_audio(audio_path)
+        if cancel_event is not None and cancel_event.is_set():
+            return Transcription(text="", duration=0.0, segments=[])
+
+        try:
+            wav = load_audio(audio_path)
+        except RuntimeError as exc:
+            raise AudioDecodeError(str(exc)) from exc
         duration = wav.numel() / SAMPLE_RATE
         if duration <= 0:
             return Transcription(text="", duration=0.0, segments=[])
+        if cancel_event is not None and cancel_event.is_set():
+            return Transcription(text="", duration=round(duration, 3), segments=[])
 
         with self._lock:
+            if cancel_event is not None and cancel_event.is_set():
+                return Transcription(text="", duration=round(duration, 3), segments=[])
             chunks = self._plan(wav, duration)
-            segments = self._decode_chunks(model, wav, chunks, word_timestamps)
+            segments = self._decode_chunks(
+                model,
+                wav,
+                chunks,
+                word_timestamps,
+                on_segment=on_segment,
+                cancel_event=cancel_event,
+            )
 
         spoken = [segment for segment in segments if segment.text]
         return Transcription(
