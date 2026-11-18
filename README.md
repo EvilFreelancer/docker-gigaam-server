@@ -2,8 +2,8 @@
 
 Распознавание русской речи на [GigaAM v3](https://github.com/salute-developers/GigaAM)
 (Sber, MIT) за API, совместимым с OpenAI, так что любой клиент `openai` или обычный `curl`
-работает без адаптеров. Два образа из одних исходников, для видеокарт NVIDIA (CUDA) и Intel (Arc A и
-B, Arc Pro, через torch XPU).
+работает без адаптеров. Из одних исходников собираются образы для NVIDIA (CUDA 12.8 и 12.6)
+и Intel (Arc A и B, Arc Pro, через torch XPU).
 
 - модель по умолчанию `v3_e2e_rnnt`, отдаётся как `gigaam-v3-e2e-rnnt`, текст сразу с
   пунктуацией, заглавными буквами и нормализованными числами;
@@ -38,6 +38,9 @@ cp .env.dist .env
 docker compose pull      # опубликованный образ evilfreelancer/gigaam-server:latest-cuda
 docker compose up -d     # или docker compose up -d --build, чтобы собрать самому
 ```
+
+Для видеокарт NVIDIA предыдущих поколений есть сборка `latest-cuda126` (CUDA 12.6).
+Проверена на GeForce GTX 1060.
 
 Intel (Arc A770, B580, Arc Pro B60 и другие).
 
@@ -167,6 +170,13 @@ git push origin v1.2.3
 
 Workflow можно запустить вручную через `workflow_dispatch`, выбрав ветку или тег. Запуск обновляет `latest-cuda` и `latest-xpu`; если выбран тег `vX.Y.Z`, также публикуются соответствующие versioned tags. Для входа в Docker Hub в настройках GitHub Actions должны быть заданы secrets `DOCKERHUB_USERNAME` и `DOCKERHUB_TOKEN`. Сборка образов не запускает тесты. Версия upstream GigaAM остаётся закреплённой в Dockerfiles и автоматически не отслеживается.
 
+Отдельный workflow `.github/workflows/docker-cuda126.yml` публикует в
+`ghcr.io/<владелец>/<репозиторий>` теги `latest-cuda126` и `2.10.0-cuda126`.
+Здесь `2.10.0` — версия PyTorch и TorchAudio, а не версия сервера.
+Сборка запускается при push в `main` с изменениями в `gigaam/` или самом workflow,
+а также вручную: **Actions → Build GigaAM CUDA 12.6 → Run workflow**.
+В форке должны быть включены GitHub Actions и разрешена запись пакетов через `GITHUB_TOKEN`.
+
 ## Настройки
 
 Всё в `.env` (шаблон `.env.dist`).
@@ -221,8 +231,8 @@ Workflow можно запустить вручную через `workflow_dispa
   апстрим на закреплённом коммите (`GIGAAM_REF` в Dockerfile). `asr.py` пользуется
   `AudioDataset` и `model._decode`, теми же внутренностями, что и апстримный longform, так что
   коммит стоит поднимать осознанно;
-- образ CUDA берёт torch с индекса CUDA 12.8, в нём есть ядра для Blackwell (sm_120) и всех
-  карт старше;
+- основной образ NVIDIA берёт torch с индекса CUDA 12.8 (включая Blackwell, `sm_120`),
+  а `latest-cuda126` использует тот же Dockerfile с индексом CUDA 12.6;
 - образ XPU собран на `intel/compute-runtime` (драйверы Level Zero и OpenCL на Ubuntu 24.04),
   torch для XPU приносит свой рантайм SYCL колёсами. Сам GigaAM от устройства не зависит,
   энкодер идёт под fp16 autocast так же, как на CUDA;
